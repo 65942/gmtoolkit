@@ -1,0 +1,44 @@
+name: release
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo build --release
+      - uses: actions/upload-artifact@v4
+        with: { name: gmtoolkit-windows, path: target/release/gmtoolkit.exe }
+
+  linux:
+    runs-on: ubuntu-22.04 # older glibc = AppImage runs on more distros
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo build --release
+      - run: |
+          mkdir -p AppDir/usr/bin
+          cp target/release/gmtoolkit AppDir/usr/bin/
+          ln -s usr/bin/gmtoolkit AppDir/AppRun
+          printf '[Desktop Entry]\nType=Application\nName=GMToolKit\nExec=gmtoolkit\nIcon=gmtoolkit\nCategories=Game;\nTerminal=false\n' > AppDir/gmtoolkit.desktop
+          touch AppDir/gmtoolkit.png # ponytail: empty icon, add real art later
+          curl -Lo appimagetool https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool
+          ARCH=x86_64 ./appimagetool --appimage-extract-and-run AppDir gmtoolkit-x86_64.AppImage
+      - uses: actions/upload-artifact@v4
+        with: { name: gmtoolkit-linux, path: gmtoolkit-x86_64.AppImage }
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup target add x86_64-apple-darwin
+      - run: |
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+          lipo -create -output gmtoolkit target/*-apple-darwin/release/gmtoolkit
+      - run: zip gmtoolkit-macos.zip gmtoolkit
+      - uses: actions/upload-artifact@v4
+        with: { name: gmtoolkit-macos, path: gmtoolkit-macos.zip }
