@@ -73,7 +73,7 @@ fn main() -> Result<()> {
             return Ok(());
         }
         Some("sync") => { for line in sync_steam_copies() { println!("{line}"); } return Ok(()); }
-        Some("vphysics") => return set_vphysics(on, tag),
+        Some(engine @ ("vphysics" | "jolt")) => return set_vphysics(engine, on, tag),
         Some("chromium") => return if on { run_patchtool(tag) } else { unpatch_chromium() },
         _ => {}
     }
@@ -81,7 +81,7 @@ fn main() -> Result<()> {
     let game = GAMES.iter().find(|g| g.id == name)
         .with_context(|| {
             let games: Vec<_> = GAMES.iter().map(|g| g.id).collect();
-            format!("unknown command {name}, pick one of: {} switch sync vphysics chromium", games.join(" "))
+            format!("unknown command {name}, pick one of: {} switch sync vphysics jolt chromium", games.join(" "))
         })?;
     install_game(game, on)
 }
@@ -588,18 +588,28 @@ fn valve_proton_id(version: &str) -> String {
     format!("proton_{}", v.replace(' ', "_"))
 }
 
-/// Whether a game's content / VPhysics-Box3D / the Chromium patches are currently installed (for the GUI badges).
+/// Whether a game's content / VPhysics-Box3D / VPhysics-Jolt / the Chromium patches are currently installed (for the GUI badges).
 pub fn is_installed(item: &str) -> bool {
     let Ok(gmod) = gmod_dir() else { return false };
-    let size = |p: &Path| fs::metadata(p).map(|m| m.len()).ok();
     match item {
-        // Box3D is in place if a backup exists and differs from the live file (Steam verify restores stock).
-        "vphysics" => ["bin/win64/vphysics.dll", "bin/vphysics.dll", "bin/linux64/vphysics.so", "bin/vphysics.so"]
-            .iter().map(|p| gmod.join(p))
-            .any(|p| size(&p.with_extension(format!("{}.orig", p.extension().unwrap().to_str().unwrap()))).is_some_and(|o| Some(o) != size(&p))),
+        // Box3D unless Jolt's version is recorded (Box3D installs predate version tracking).
+        "vphysics" => vphysics_swapped(&gmod) && installed_version("jolt").is_none(),
+        "jolt" => vphysics_swapped(&gmod) && installed_version("jolt").is_some(),
         "chromium" => chromium_patched(&gmod),
         _ => uses_steam_copy(item) || mount_cfg().and_then(|c| Ok(fs::read_to_string(c)?)).is_ok_and(|c| mount_entry(&c, item).is_some()),
     }
+}
+
+/// A physics engine is in place if a backup exists and differs from the live file (Steam verify restores stock).
+fn vphysics_swapped(gmod: &Path) -> bool {
+    let size = |p: &Path| fs::metadata(p).map(|m| m.len()).ok();
+    ["bin/win64/vphysics.dll", "bin/vphysics.dll", "bin/linux64/vphysics.so", "bin/vphysics.so"]
+        .iter().map(|p| gmod.join(p)).any(|p| size(&orig(&p)).is_some_and(|o| Some(o) != size(&p)))
+}
+
+/// `vphysics.dll` -> `vphysics.dll.orig`
+fn orig(p: &Path) -> PathBuf {
+    p.with_extension(format!("{}.orig", p.extension().unwrap().to_str().unwrap()))
 }
 
 /// CREATE_NO_WINDOW: the app is GUI-only on Windows, so console children would pop a window.
@@ -615,6 +625,16 @@ fn data_dir() -> Result<PathBuf> {
 
 /// Downloads a release asset, checked against GitHub's sha256 digest.
 pub const BOX3D_REPO: &str = "Asphaltian/VPhysics-Box3D";
+pub const JOLT_REPO: &str = "misyltoad/VPhysics-Jolt";
+/// Jolt's last release (2024) predates GitHub's asset digests, so its GMod zips are pinned here.
+// ponytail: only 0.20 is pinned; a newer Jolt release would carry GitHub digests and need none.
+pub const JOLT_TAG: &str = "0.20";
+const PINNED: &[(&str, &str)] = &[
+    ("vphysics_jolt_0.20_gmod_win64.zip", "cdcefbb3ec9763041f5885fabdccb87b1b30a45f2622dfc0d3278b37bd624d0e"),
+    ("vphysics_jolt_0.20_gmod_win32.zip", "bf64153fa0134223866cc3816f6b0ff172f6b5bdf343f9580b0edfab2b583e2c"),
+    ("vphysics_jolt_0.20_gmod_linux64.zip", "47f2a2e26209d96464eae74182bb490b5d7200ca9ffe9a54f302c2db8d78f1c6"),
+    ("vphysics_jolt_0.20_gmod_linux32.zip", "dd9035a659f802966f44008adac45528bb363ef135bad80410a35964b437d2c4"),
+];
 pub const PATCHTOOL_REPO: &str = "solsticegamestudios/GModPatchTool";
 
 fn github_json(path: &str) -> Result<serde_json::Value> {
@@ -675,6 +695,7 @@ fn github_asset(rel: &serde_json::Value, name: &str) -> Result<Vec<u8>> {
         .with_context(|| format!("release {} has no {name}", rel["tag_name"]))?;
     let url = asset["browser_download_url"].as_str().context("no download url")?;
     let want = asset["digest"].as_str().and_then(|d| d.strip_prefix("sha256:"))
+        .or_else(|| PINNED.iter().find(|(n, _)| *n == name).map(|(_, h)| *h))
         .context("release asset has no sha256 digest")?;
     let bytes = ureq::get(url).call()?.into_body().with_config().limit(1 << 30).read_to_vec()?;
     let got: String = sha2::Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
@@ -682,39 +703,74 @@ fn github_asset(rel: &serde_json::Value, name: &str) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-/// Swaps GMod's physics for VPhysics-Box3D in every binary dir that has a vphysics, keeping a `.orig` backup.
-fn set_vphysics(on: bool, tag: Option<&str>) -> Result<()> {
-    if std::env::consts::OS == "macos" { bail!("VPhysics-Box3D has no macOS build"); }
-    let bin = gmod_dir()?.join("bin");
-    // (path inside bin, Box3D release asset). Proton installs use the Windows dlls on Linux too.
+/// Swaps GMod's physics for VPhysics-Box3D (`vphysics`) or VPhysics-Jolt (`jolt`) in every binary dir that has
+/// a vphysics, keeping `.orig` backups. Both engines share the backups, so installing one removes the other.
+fn set_vphysics(engine: &str, on: bool, tag: Option<&str>) -> Result<()> {
+    if std::env::consts::OS == "macos" { bail!("{engine} has no macOS build"); }
+    let gmod = gmod_dir()?;
+    let bin = gmod.join("bin");
+    // Back to stock first, so an update or a switch of engine never backs up a replaced file.
+    let restored = if on && !vphysics_swapped(&gmod) { 0 } else { restore_vphysics(&bin)? };
+    if !on {
+        if restored == 0 { bail!("no vphysics backup to restore"); }
+        for e in ["vphysics", "jolt"] { set_installed_version(e, None)?; }
+        println!("restored {restored} vphysics file(s)");
+        return Ok(());
+    }
+    let (repo, tag, name) = match engine {
+        "jolt" => (JOLT_REPO, Some(tag.unwrap_or(JOLT_TAG)), "VPhysics-Jolt"),
+        _ => (BOX3D_REPO, tag, "VPhysics-Box3D"),
+    };
+    let release = github_release(repo, tag)?;
+    let tag = release["tag_name"].as_str().context("release has no tag")?;
+    // (dir inside bin, stock file, Box3D asset, Jolt platform). Proton installs use the Windows dlls on Linux too.
     let targets = [
-        ("win64/vphysics.dll", "gmod-x64.zip"),
-        ("vphysics.dll", "gmod-x86.zip"),
-        ("linux64/vphysics.so", "gmod-linux-x64.zip"),
-        ("vphysics.so", "gmod-linux-x86.zip"),
+        ("win64", "vphysics.dll", "gmod-x64.zip", "win64"),
+        ("", "vphysics.dll", "gmod-x86.zip", "win32"),
+        ("linux64", "vphysics.so", "gmod-linux-x64.zip", "linux64"),
+        ("", "vphysics.so", "gmod-linux-x86.zip", "linux32"),
     ];
-    let release = if on { Some(github_release(BOX3D_REPO, tag)?) } else { None };
     let mut n = 0;
-    for (rel, asset) in targets {
-        let dst = bin.join(rel);
-        let orig = dst.with_extension(format!("{}.orig", dst.extension().unwrap().to_str().unwrap()));
-        if on && dst.exists() {
-            let zip = github_asset(release.as_ref().unwrap(), asset)?;
-            let mut file = Vec::new();
-            std::io::Read::read_to_end(&mut zip::ZipArchive::new(std::io::Cursor::new(zip))?.by_name(dst.file_name().unwrap().to_str().unwrap())?, &mut file)?;
-            // Refresh the backup unless Box3D is already there (Steam updates overwrite it with stock).
-            if fs::read(&dst)? != file { fs::copy(&dst, &orig)?; }
-            fs::write(&dst, file)?;
-            n += 1;
-        } else if !on && orig.exists() {
-            fs::rename(&orig, &dst)?;
-            n += 1;
+    for (dir, file, box3d, jolt) in targets {
+        let dir = bin.join(dir);
+        if !dir.join(file).exists() { continue; }
+        let asset = if engine == "jolt" { format!("vphysics_jolt_{tag}_gmod_{jolt}.zip") } else { box3d.to_owned() };
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(github_asset(&release, &asset)?))?;
+        for i in 0..zip.len() {
+            let mut entry = zip.by_index(i)?;
+            let Some(fname) = entry.enclosed_name().and_then(|p| Some(p.file_name()?.to_str()?.to_owned())) else { continue };
+            // Replaces GMod's own files (vphysics, vphysics_client); adds Jolt's per-CPU builds its loader picks from.
+            let extra = fname.starts_with("vphysics_jolt_");
+            let dst = dir.join(&fname);
+            if entry.is_dir() || fname.ends_with(".dbg") || fname.ends_with(".pdb") || !(extra || dst.exists()) { continue; }
+            if !extra { fs::copy(&dst, orig(&dst))?; }
+            std::io::copy(&mut entry, &mut fs::File::create(&dst)?)?;
+        }
+        n += 1;
+    }
+    if n == 0 { bail!("no vphysics files found to replace"); }
+    set_installed_version(engine, Some(tag))?;
+    set_installed_version(if engine == "jolt" { "vphysics" } else { "jolt" }, None)?;
+    println!("installed {name} over {n} vphysics file(s)");
+    Ok(())
+}
+
+/// Puts back every `vphysics*.orig` backup and deletes Jolt's extra files; returns how many were restored.
+fn restore_vphysics(bin: &Path) -> Result<usize> {
+    let mut n = 0;
+    for dir in [bin.to_owned(), bin.join("win64"), bin.join("linux64")] {
+        let Ok(entries) = fs::read_dir(&dir) else { continue };
+        for path in entries.filter_map(|e| Some(e.ok()?.path())) {
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+            if let Some(stock) = name.strip_suffix(".orig").filter(|s| s.starts_with("vphysics")) {
+                fs::rename(&path, dir.join(stock))?;
+                n += 1;
+            } else if name.starts_with("vphysics_jolt_") {
+                fs::remove_file(&path)?;
+            }
         }
     }
-    if n == 0 { bail!("{}", if on { "no vphysics files found to replace" } else { "no VPhysics-Box3D backup to restore" }); }
-    set_installed_version("vphysics", release.as_ref().and_then(|r| r["tag_name"].as_str()))?;
-    println!("{} {n} vphysics file(s)", if on { "installed VPhysics-Box3D over" } else { "restored" });
-    Ok(())
+    Ok(n)
 }
 
 /// Downloads the latest GModPatchTool and runs it with inherited stdio.
@@ -799,7 +855,7 @@ fn unpatch_chromium() -> Result<()> {
     cmd.status()?;
     set_installed_version("chromium", None)?;
     println!("Steam is verifying Garry's Mod, which restores the unpatched files.");
-    println!("Note: this also restores the stock vphysics if VPhysics-Box3D was installed.");
+    println!("Note: this also restores the stock vphysics if VPhysics-Box3D or VPhysics-Jolt was installed.");
     Ok(())
 }
 
@@ -910,4 +966,18 @@ fn latest_builds_real() {
     println!("{builds:?}");
     assert_eq!(builds.len(), ids.len());
     assert!(!releases(BOX3D_REPO).unwrap().is_empty());
+}
+
+#[test]
+fn restore_vphysics_puts_stock_back() {
+    let bin = std::env::temp_dir().join(format!("gmtoolkit-vphysics-{}", std::process::id()));
+    fs::create_dir_all(bin.join("win64")).unwrap();
+    for (f, c) in [("win64/vphysics.dll", "jolt"), ("win64/vphysics.dll.orig", "stock"), ("win64/vphysics_jolt_avx2.dll", "x"), ("vphysics_stub.dll", "stub")] {
+        fs::write(bin.join(f), c).unwrap();
+    }
+    assert_eq!(restore_vphysics(&bin).unwrap(), 1);
+    assert_eq!(fs::read_to_string(bin.join("win64/vphysics.dll")).unwrap(), "stock");
+    assert!(!bin.join("win64/vphysics_jolt_avx2.dll").exists() && !bin.join("win64/vphysics.dll.orig").exists());
+    assert!(bin.join("vphysics_stub.dll").exists());
+    fs::remove_dir_all(bin).unwrap();
 }

@@ -209,8 +209,10 @@ pub fn run() -> eframe::Result {
 
 /// Looks up the latest Steam builds and GitHub releases without blocking the UI.
 fn fetch_remote(remote: Arc<Mutex<Remote>>, ctx: egui::Context) {
-    // VPhysics-Box3D has no macOS build, so its row (and release list) only exist elsewhere.
+    // The VPhysics engines have no macOS build, so their rows (and release lists) only exist elsewhere.
     let repos: &[&'static str] = if cfg!(target_os = "macos") { &[crate::PATCHTOOL_REPO] } else { &[crate::BOX3D_REPO, crate::PATCHTOOL_REPO] };
+    // Only Jolt's pinned release can be verified, so it's the only one offered.
+    remote.lock().unwrap().releases.insert(crate::JOLT_REPO, vec![crate::JOLT_TAG.to_owned()]);
     for &repo in repos {
         let (remote, ctx) = (remote.clone(), ctx.clone());
         thread::spawn(move || if let Ok(tags) = crate::releases(repo) {
@@ -345,6 +347,8 @@ struct App {
     selected: HashMap<String, String>,
     mounted_branch: String,
     show_log: bool,
+    /// Action waiting for confirmation: (question, button, CLI args).
+    confirm: Option<(String, &'static str, Vec<String>)>,
     /// No GMod folder chosen yet: show the first-launch screen.
     setup: bool,
     /// The GMod folder field (setup screen and Settings).
@@ -368,6 +372,7 @@ enum Source { Steam(u32), GitHub(&'static str) }
 fn source(id: &str) -> Source {
     match id {
         "vphysics" => Source::GitHub(crate::BOX3D_REPO),
+        "jolt" => Source::GitHub(crate::JOLT_REPO),
         "chromium" => Source::GitHub(crate::PATCHTOOL_REPO),
         _ => Source::Steam(crate::GAMES.iter().find(|g| g.id == id).map_or(0, |g| g.server_appid)),
     }
@@ -380,7 +385,7 @@ impl App {
             self.steam_copy.insert(g.id, crate::uses_steam_copy(g.id));
             self.partial.insert(g.id, crate::is_partial(g.id));
         }
-        for item in crate::GAMES.iter().map(|g| g.id).chain(["vphysics", "chromium"]) {
+        for item in crate::GAMES.iter().map(|g| g.id).chain(["vphysics", "jolt", "chromium"]) {
             self.installed.insert(item, crate::is_installed(item));
             self.versions.insert(item, crate::installed_version(item));
         }
@@ -528,12 +533,19 @@ impl App {
                     if !label.is_empty() {
                         let b = ui.add_enabled(!busy && can_install.is_ok(), primary(label).min_size(egui::vec2(BUTTON_WIDTH, 0.0)));
                         let b = if let Err(why) = can_install { b.on_disabled_hover_text(why) } else { b };
-                        if b.clicked() { self.start(ui.ctx(), &args.iter().map(String::as_str).collect::<Vec<_>>()); }
+                        // Box3D and Jolt replace the same files, so installing one removes the other.
+                        let other = match id { "vphysics" => Some(("jolt", "VPhysics-Jolt")), "jolt" => Some(("vphysics", "VPhysics-Box3D")), _ => None };
+                        if b.clicked() {
+                            match other.filter(|(o, _)| self.installed.get(o).copied().unwrap_or(false)) {
+                                Some((_, other)) => self.confirm = Some((format!("Installing {name} will uninstall {other}."), "Install", args.clone())),
+                                None => self.start(ui.ctx(), &args.iter().map(String::as_str).collect::<Vec<_>>()),
+                            }
+                        }
                     }
                     if installed {
                         let b = egui::Button::new(RichText::new("Uninstall").color(p.danger))
                             .fill(p.danger.gamma_multiply(0.12)).min_size(egui::vec2(BUTTON_WIDTH, 0.0));
-                        if ui.add_enabled(!busy, b).clicked() { self.start(ui.ctx(), &[id, "off"]); }
+                        if ui.add_enabled(!busy, b).clicked() { self.confirm = Some((format!("Uninstall {name}?"), "Uninstall", vec![id.into(), "off".into()])); }
                     }
                 });
                 if let Source::GitHub(_) = source(id) {
@@ -626,6 +638,24 @@ impl eframe::App for App {
             }
         });
 
+        if let Some((question, action, args)) = self.confirm.clone() {
+            let modal = egui::Modal::new(egui::Id::new("confirm")).show(ui.ctx(), |ui| {
+                ui.label(RichText::new(question).strong().color(p.title));
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    let b = if action == "Uninstall" {
+                        egui::Button::new(RichText::new(action).color(p.danger)).fill(p.danger.gamma_multiply(0.12))
+                    } else { primary(action) };
+                    if ui.add_enabled(!busy, b).clicked() {
+                        self.start(ui.ctx(), &args.iter().map(String::as_str).collect::<Vec<_>>());
+                        self.confirm = None;
+                    }
+                    if ui.button("Cancel").clicked() { self.confirm = None; }
+                });
+            });
+            if modal.should_close() { self.confirm = None; }
+        }
+
         if let Some(p) = self.picked_folder.lock().unwrap().take() {
             self.path_input = p.display().to_string();
             self.path_msg = None;
@@ -671,13 +701,15 @@ impl eframe::App for App {
                             if !cfg!(target_os = "macos") {
                                 ui.separator();
                                 self.item_row(ui, "vphysics", "VPhysics-Box3D", "A faster physics engine. GMod's original is backed up.", Ok(()), busy);
+                                ui.separator();
+                                self.item_row(ui, "jolt", "VPhysics-Jolt", "Physics engine built on Jolt. Last released in 2024. GMod's original is backed up.", Ok(()), busy);
                             }
                         });
                         if self.installed.get("chromium").copied().unwrap_or(false) {
                             let note = if cfg!(target_os = "macos") {
                                 "Uninstalling the Chromium patches makes Steam verify GMod's files."
                             } else {
-                                "Uninstalling the Chromium patches makes Steam verify GMod's files, which also removes VPhysics-Box3D."
+                                "Uninstalling the Chromium patches makes Steam verify GMod's files, which also removes VPhysics-Box3D or VPhysics-Jolt."
                             };
                             ui.label(RichText::new(note).small().color(p.muted));
                         }

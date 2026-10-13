@@ -8,8 +8,8 @@ Cross-platform (Windows/Linux/macOS) Rust tool that sets up Garry's Mod: game co
 - `cargo test -- --include-ignored` — also hits this machine's real Steam files, steamcmd and GitHub
 - `cargo run -- <game id> [off]` — install / uninstall content; ids are in `GAMES` (cstrike, tf, dod, hl2mp, left4dead2, …). Downloads GBs and edits the real GMod install
 - `cargo run -- sync` — run `sync_steam_copies` (mount path fixes, Steam-copy cleanup, model lists, addon)
-- `cargo run -- vphysics [off|<tag>]` / `chromium [off|<tag>]` — a release tag installs that version instead of the latest
-- `vphysics` installs VPhysics-Box3D over every existing `bin/**/vphysics.{dll,so}`, `.orig` backup restored by `off`
+- `cargo run -- vphysics [off|<tag>]` / `jolt [off|<tag>]` / `chromium [off|<tag>]` — a release tag installs that version instead of the latest
+- `vphysics` (Box3D) / `jolt` install over every existing `bin/**/vphysics.{dll,so}` with `.orig` backups shared by both: installing one first restores stock (`restore_vphysics`, also deletes Jolt's `vphysics_jolt_*` per-CPU builds), so they replace each other; `off` restores. The GUI asks before installing one over the other
 - `cargo run -- chromium` — "Chromium patches": refuses unless `MountedConfig` BetaKey is `x86-64`; runs latest GModPatchTool headless (`FORCE_GUI=0`, `-s`), log relayed as `[patch]` lines, tag + patched files with mtimes saved to `<data>/versions/chromium` (badge = all unchanged)
 - `cargo run -- chromium off` — opens `steam://validate/4000` (Steam must be running; also reverts Box3D)
 - `cargo run -- switch <x86-64|default|prerelease|dev> [native|proton|<compat tool id>]` — branch (+ compat tool on Linux); refuses while Steam runs.
@@ -31,11 +31,11 @@ Cross-platform (Windows/Linux/macOS) Rust tool that sets up Garry's Mod: game co
 - GUI theme: on Linux `watch_desktop_theme` re-checks every 3s: KDE's full color scheme from kdeglobals (`kde_palette`), else the XDG settings portal via `busctl` (`portal_theme`: dark/light + accent); elsewhere egui's OS detection. Colors in `pal()` / `style()`, accent in the `ACCENT` atomic.
 - Versions: installs record a version in `<data>/versions/<id>` (GitHub tag, or the server's Steam buildid from its appmanifest). The GUI fetches latest GitHub releases (`releases`) and current server builds (`latest_builds`, one anonymous steamcmd app_info_print) in the background and shows "Update available"; GitHub items also get a version dropdown. Installs from before tracking show "version unknown".
 - GUI fonts/shapes follow the desktop: `desktop_font` (KDE kdeglobals `font=`/`fixed=` or Plasma defaults Noto Sans/Hack 10pt; else gsettings; Windows Segoe UI/Consolas; macOS SF) → `font_file` (fc-match on Linux) → `load_system_fonts`; all text sizes scale from `base_px()`. Corner radii per desktop in `radii()` (Breeze small, Adwaita round, Win11/macOS between).
-- Features a platform can't use are hidden, not disabled: compat tool dropdown Linux-only, VPhysics-Box3D (row, notes, release fetch) not on macOS.
+- Features a platform can't use are hidden, not disabled: compat tool dropdown Linux-only, VPhysics rows (notes, release fetch) not on macOS.
 - Cancel/Resume: tasks run in their own process group (Unix) and Cancel kills the group (`kill -TERM -<pgid>`) or tree (`taskkill /T`); closing the window cancels too (`on_exit`). A game dir with no mount entry is `is_partial` → row shows Resume (re-runs the install; steamcmd continues the partial download) and Discard (`<id> off`).
 - GUI layout: first launch asks for the GMod folder; tabs "Game content" ("Supported by GMod" / "Other Source games") / "Patches" (version card + Chromium + Box3D) / "Settings" (GMod folder). `item_row` buttons sit in a fixed-width column: Install; Update/Switch + Uninstall when installed; disabled "Steam" for owned games; Resume/Discard for partial downloads; Cancel + spinner while running. Bottom status bar shows the last log line with a Show log toggle.
 - Compat dropdown shows GMod's actual forced tool; a third-party one (e.g. Proton-GE) is left untouched unless the user picks Native / Proton Experimental.
-- VPhysics: Box3D only (active, has GMod release zips; Jolt's last release is 2024). No macOS build.
+- VPhysics: Box3D (active) and Jolt (`misyltoad/VPhysics-Jolt`, last release 0.20 in 2024). Jolt's assets have no GitHub digest, so their sha256 is pinned in `PINNED` and only `JOLT_TAG` is offered. Neither has a macOS build.
 - x86-64 branch on macOS is unconfirmed; mark experimental.
 - Branch switch: `BetaKey` in `appmanifest_4000.acf` UserConfig; compat tool: `CompatToolMapping` 4000 → tool id in `config/config.vdf` (removed for native). Steam must be closed.
 - Steam VDF: parsed with `keyvalues-parser`, but written by our own `write_vdf` — Steam escapes only `\\` and `"` and keeps newlines literal, which neither of the crate's renderers matches.
