@@ -5,7 +5,8 @@ A tool I made to set up Garry's Mod without doing everything by hand.
 It can:
 - Download content from other Source games via SteamCMD, even if you don't own them
 - Switch Gmod to the x86-64 branch and run GModPatchTool so the Chromium browser works
-- Install VPhysics-Box3D
+- Install VPhysics-Box3D or VPhysics-Jolt
+- Install SkateGM from your own copy of Skate 3
 - On Linux, pick between native and Proton
 
 Works on Linux. Windows and Mac might work but I haven't tested it.
@@ -35,6 +36,8 @@ There's no release yet. You can get a build from the Actions tab (you need to be
 
 Open it, pick your Gmod folder if it doesn't find it, and click stuff. Close Steam before switching branches.
 
+SkateGM needs the x86-64 branch, and Windows or GMod running under Proton on Linux. You also need your own Skate 3 (Xbox 360) disc image (`.iso`) or the `default.xex` from an extracted copy.
+
 You can also use it from the terminal:
 
 ```
@@ -44,6 +47,8 @@ gmtoolkit switch x86-64    # switch branch
 gmtoolkit chromium         # run the chromium patches
 gmtoolkit chromium off     # undo them
 gmtoolkit vphysics         # install box3d (vphysics off to undo)
+gmtoolkit jolt             # install jolt instead (jolt off to undo)
+gmtoolkit skategm skate3.iso   # install skategm (skategm off to undo)
 gmtoolkit sync             # fix mounts if something breaks
 ```
 
@@ -57,6 +62,8 @@ cargo run --release
 
 - [GModPatchTool](https://github.com/solsticegamestudios/GModPatchTool)
 - [VPhysics-Box3D](https://github.com/Asphaltian/VPhysics-Box3D)
+- [VPhysics-Jolt](https://github.com/misyltoad/VPhysics-Jolt)
+- [SkateGM](https://github.com/the-schwilliam/SkateGM)
 
 ## License
 

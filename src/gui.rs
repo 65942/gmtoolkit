@@ -210,10 +210,11 @@ pub fn run() -> eframe::Result {
 /// Looks up the latest Steam builds and GitHub releases without blocking the UI.
 fn fetch_remote(remote: Arc<Mutex<Remote>>, ctx: egui::Context) {
     // The VPhysics engines have no macOS build, so their rows (and release lists) only exist elsewhere.
-    let repos: &[&'static str] = if cfg!(target_os = "macos") { &[crate::PATCHTOOL_REPO] } else { &[crate::BOX3D_REPO, crate::PATCHTOOL_REPO] };
+    let mut repos = if cfg!(target_os = "macos") { vec![crate::PATCHTOOL_REPO] } else { vec![crate::BOX3D_REPO, crate::PATCHTOOL_REPO] };
+    if crate::skategm_supported() { repos.push(crate::SKATEGM_REPO); }
     // Only Jolt's pinned release can be verified, so it's the only one offered.
     remote.lock().unwrap().releases.insert(crate::JOLT_REPO, vec![crate::JOLT_TAG.to_owned()]);
-    for &repo in repos {
+    for repo in repos {
         let (remote, ctx) = (remote.clone(), ctx.clone());
         thread::spawn(move || if let Ok(tags) = crate::releases(repo) {
             remote.lock().unwrap().releases.insert(repo, tags);
@@ -357,6 +358,8 @@ struct App {
     path_msg: Option<(bool, String)>,
     /// Folder picked in the Browse dialog, which runs on its own thread.
     picked_folder: Arc<Mutex<Option<std::path::PathBuf>>>,
+    /// SkateGM install args, completed with the disc picked in its file dialog.
+    picked_disc: Arc<Mutex<Option<Vec<String>>>>,
 }
 
 #[derive(Default)]
@@ -374,6 +377,7 @@ fn source(id: &str) -> Source {
         "vphysics" => Source::GitHub(crate::BOX3D_REPO),
         "jolt" => Source::GitHub(crate::JOLT_REPO),
         "chromium" => Source::GitHub(crate::PATCHTOOL_REPO),
+        "skategm" => Source::GitHub(crate::SKATEGM_REPO),
         _ => Source::Steam(crate::GAMES.iter().find(|g| g.id == id).map_or(0, |g| g.server_appid)),
     }
 }
@@ -385,7 +389,7 @@ impl App {
             self.steam_copy.insert(g.id, crate::uses_steam_copy(g.id));
             self.partial.insert(g.id, crate::is_partial(g.id));
         }
-        for item in crate::GAMES.iter().map(|g| g.id).chain(["vphysics", "jolt", "chromium"]) {
+        for item in crate::GAMES.iter().map(|g| g.id).chain(["vphysics", "jolt", "chromium", "skategm"]) {
             self.installed.insert(item, crate::is_installed(item));
             self.versions.insert(item, crate::installed_version(item));
         }
@@ -538,6 +542,17 @@ impl App {
                         if b.clicked() {
                             match other.filter(|(o, _)| self.installed.get(o).copied().unwrap_or(false)) {
                                 Some((_, other)) => self.confirm = Some((format!("Installing {name} will uninstall {other}."), "Install", args.clone())),
+                                // A first install converts the user's own Skate 3 disc; updates reuse it.
+                                None if id == "skategm" && !installed => {
+                                    let (slot, ctx) = (self.picked_disc.clone(), ui.ctx().clone());
+                                    thread::spawn(move || {
+                                        if let Some(f) = rfd::FileDialog::new().set_title("Your Skate 3 disc image (.iso) or default.xex")
+                                            .add_filter("Skate 3 disc image or default.xex", &["iso", "xex"]).pick_file() {
+                                            *slot.lock().unwrap() = Some(args.into_iter().chain([f.display().to_string()]).collect());
+                                            ctx.request_repaint();
+                                        }
+                                    });
+                                }
                                 None => self.start(ui.ctx(), &args.iter().map(String::as_str).collect::<Vec<_>>()),
                             }
                         }
@@ -656,6 +671,8 @@ impl eframe::App for App {
             if modal.should_close() { self.confirm = None; }
         }
 
+        let disc = self.picked_disc.lock().unwrap().take();
+        if let Some(args) = disc { self.start(ui.ctx(), &args.iter().map(String::as_str).collect::<Vec<_>>()); }
         if let Some(p) = self.picked_folder.lock().unwrap().take() {
             self.path_input = p.display().to_string();
             self.path_msg = None;
@@ -703,6 +720,10 @@ impl eframe::App for App {
                                 self.item_row(ui, "vphysics", "VPhysics-Box3D", "A faster physics engine. GMod's original is backed up.", Ok(()), busy);
                                 ui.separator();
                                 self.item_row(ui, "jolt", "VPhysics-Jolt", "Physics engine built on Jolt. Last released in 2024. GMod's original is backed up.", Ok(()), busy);
+                            }
+                            if crate::skategm_supported() {
+                                ui.separator();
+                                self.item_row(ui, "skategm", "SkateGM", "Skate 3's skating, converted from your own Skate 3 disc (.iso or default.xex)", needs_x64, busy);
                             }
                         });
                         if self.installed.get("chromium").copied().unwrap_or(false) {

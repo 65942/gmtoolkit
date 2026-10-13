@@ -75,13 +75,19 @@ fn main() -> Result<()> {
         Some("sync") => { for line in sync_steam_copies() { println!("{line}"); } return Ok(()); }
         Some(engine @ ("vphysics" | "jolt")) => return set_vphysics(engine, on, tag),
         Some("chromium") => return if on { run_patchtool(tag) } else { unpatch_chromium() },
+        // skategm [<tag>] [<disc .iso or default.xex>]
+        Some("skategm") => {
+            let disc = args[1..].iter().find(|a| Path::new(a).is_file()).map(String::as_str);
+            let tag = args[1..].iter().map(String::as_str).find(|a| Some(*a) != disc && *a != "off");
+            return if on { install_skategm(tag, disc) } else { remove_skategm() };
+        }
         _ => {}
     }
     let name = args[0].clone();
     let game = GAMES.iter().find(|g| g.id == name)
         .with_context(|| {
             let games: Vec<_> = GAMES.iter().map(|g| g.id).collect();
-            format!("unknown command {name}, pick one of: {} switch sync vphysics jolt chromium", games.join(" "))
+            format!("unknown command {name}, pick one of: {} switch sync vphysics jolt chromium skategm", games.join(" "))
         })?;
     install_game(game, on)
 }
@@ -596,6 +602,7 @@ pub fn is_installed(item: &str) -> bool {
         "vphysics" => vphysics_swapped(&gmod) && installed_version("jolt").is_none(),
         "jolt" => vphysics_swapped(&gmod) && installed_version("jolt").is_some(),
         "chromium" => chromium_patched(&gmod),
+        "skategm" => gmod.join("garrysmod/lua/bin/gmcl_skategm_win64.dll").exists(),
         _ => uses_steam_copy(item) || mount_cfg().and_then(|c| Ok(fs::read_to_string(c)?)).is_ok_and(|c| mount_entry(&c, item).is_some()),
     }
 }
@@ -636,6 +643,11 @@ const PINNED: &[(&str, &str)] = &[
     ("vphysics_jolt_0.20_gmod_linux32.zip", "dd9035a659f802966f44008adac45528bb363ef135bad80410a35964b437d2c4"),
 ];
 pub const PATCHTOOL_REPO: &str = "solsticegamestudios/GModPatchTool";
+pub const SKATEGM_REPO: &str = "the-schwilliam/SkateGM";
+/// uv runs SkateGM's Python exporter with its own Python and packages, so users install nothing.
+const UV_TAG: &str = "0.13.0";
+/// The vgmstream release SkateGM's own installer bundles (its tools/fetch_vgmstream.py).
+const VGMSTREAM_TAG: &str = "r2117";
 
 fn github_json(path: &str) -> Result<serde_json::Value> {
     Ok(serde_json::from_reader(ureq::get(&format!("https://api.github.com/repos/{path}"))
@@ -857,6 +869,89 @@ fn unpatch_chromium() -> Result<()> {
     println!("Steam is verifying Garry's Mod, which restores the unpatched files.");
     println!("Note: this also restores the stock vphysics if VPhysics-Box3D or VPhysics-Jolt was installed.");
     Ok(())
+}
+
+/// SkateGM's engine module is Windows-only, so on Linux GMod has to run under Proton.
+pub fn skategm_supported() -> bool {
+    cfg!(windows) || gmod_uses_wine()
+}
+
+/// Installs SkateGM from its release zip: `skategm.py` converts the user's own Skate 3 disc (.iso or
+/// default.xex) with the bundled exporter and copies the module and add-on in. Without a disc, the one
+/// used last time is converted again if it's still there, else the converted data is kept.
+fn install_skategm(tag: Option<&str>, disc: Option<&str>) -> Result<()> {
+    if !skategm_supported() { bail!("SkateGM's module is Windows-only: on Linux, GMod has to run under Proton"); }
+    // The module is 64-bit; MountedConfig confirms Steam finished switching.
+    if current_branch(true)? != "x86-64" { bail!("SkateGM needs the 64-bit branch installed: switch to it and let Steam update GMod first"); }
+    let gmod = gmod_dir()?;
+    let dir = data_dir()?.join("skategm");
+    fs::create_dir_all(&dir)?;
+    let remembered = dir.join("disc.txt");
+    if let Some(d) = disc { fs::write(&remembered, d)?; }
+    let disc = fs::read_to_string(&remembered).ok().filter(|d| Path::new(d).is_file());
+    let release = github_release(SKATEGM_REPO, tag)?;
+    let zip = release["assets"].as_array().into_iter().flatten().filter_map(|a| a["name"].as_str())
+        .find(|n| n.starts_with("skategm_") && n.ends_with(".zip")).context("release has no skategm zip")?;
+    let unpacked = dir.join("release");
+    let _ = fs::remove_dir_all(&unpacked);
+    zip::ZipArchive::new(std::io::Cursor::new(github_asset(&release, zip)?))?.extract(&unpacked)?;
+    let (uv_asset, uv_exe, vgm_asset, vgm_exe) = if cfg!(windows) {
+        ("uv-x86_64-pc-windows-msvc.zip", "uv.exe", "vgmstream-win64.zip", "vgmstream-cli.exe")
+    } else {
+        ("uv-x86_64-unknown-linux-gnu.tar.gz", "uv-x86_64-unknown-linux-gnu/uv", "vgmstream-linux.zip", "vgmstream-cli")
+    };
+    let uv = github_tool("astral-sh/uv", UV_TAG, uv_asset, &dir.join(format!("uv-{UV_TAG}")), uv_exe)?;
+    let vgmstream = github_tool("vgmstream/vgmstream", VGMSTREAM_TAG, vgm_asset, &dir.join(format!("vgmstream-{VGMSTREAM_TAG}")), vgm_exe)?;
+    let script = dir.join("install.py");
+    fs::write(&script, include_str!("skategm.py"))?;
+    let data = dir.join("data");
+    let mut cmd = Command::new(uv);
+    cmd.env("UV_CACHE_DIR", dir.join("uv-cache")).env("UV_PYTHON_INSTALL_DIR", dir.join("python"))
+        .args(["run", "--no-project", "--python", "3.13", "--with", "numpy", "--with", "pillow", "--with", "soundfile", "python", "-I"])
+        .arg(&script).arg(&unpacked).arg(&gmod).arg(&data).arg(mount_path(&data.join("assets"))).arg(&vgmstream);
+    if let Some(d) = &disc { cmd.arg(d); }
+    hide_window(&mut cmd);
+    if !cmd.status()?.success() { bail!("SkateGM install failed"); }
+    set_installed_version("skategm", release["tag_name"].as_str())
+}
+
+/// Removes what SkateGM's own uninstaller does, plus the converted data and downloads.
+fn remove_skategm() -> Result<()> {
+    let g = gmod_dir()?.join("garrysmod");
+    for f in ["lua/bin/gmcl_skategm_win64.dll", "lua/bin/skategm_sdl2.dll", "lua/bin/skategm_gamecontrollerdb.txt",
+              "data/skategm/datapath.txt", "data/skategm/skate3_sounds.json", "data/skategm/skate3_music.json"] {
+        match fs::remove_file(g.join(f)) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => bail!("couldn't remove {f} ({e}): close Garry's Mod and try again"),
+            _ => {}
+        }
+    }
+    for d in ["addons/skategm", "addons/skategm_maps", "addons/skategm_s3sounds", "addons/skategm_s3music", "data/skategm_hud"] {
+        let _ = fs::remove_dir_all(g.join(d));
+    }
+    let _ = fs::remove_dir_all(data_dir()?.join("skategm"));
+    set_installed_version("skategm", None)?;
+    println!("SkateGM removed (your settings, boards and replays in data/skategm are kept).");
+    Ok(())
+}
+
+/// A pinned GitHub release asset, downloaded and unpacked into `dir` once; returns `dir/<exe>`.
+fn github_tool(repo: &str, tag: &str, asset: &str, dir: &Path, exe: &str) -> Result<PathBuf> {
+    let path = dir.join(exe);
+    if path.exists() { return Ok(path); }
+    let bytes = github_asset(&github_release(repo, Some(tag))?, asset)?;
+    fs::create_dir_all(dir)?;
+    if asset.ends_with(".zip") {
+        zip::ZipArchive::new(std::io::Cursor::new(bytes))?.extract(dir)?;
+    } else {
+        let archive = dir.join(asset);
+        fs::write(&archive, bytes)?;
+        let ok = Command::new("tar").arg("xzf").arg(&archive).arg("-C").arg(dir).status()?.success();
+        fs::remove_file(&archive)?;
+        if !ok { bail!("couldn't unpack {asset}"); }
+    }
+    #[cfg(unix)]
+    fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o755))?;
+    Ok(path)
 }
 
 fn ensure_steamcmd(dir: &Path) -> Result<PathBuf> {
