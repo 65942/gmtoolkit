@@ -81,13 +81,14 @@ fn main() -> Result<()> {
             let tag = args[1..].iter().map(String::as_str).find(|a| Some(*a) != disc && *a != "off");
             return if on { install_skategm(tag, disc) } else { remove_skategm() };
         }
+        Some("gwater2") => return if on { install_gwater2(tag) } else { remove_gwater2() },
         _ => {}
     }
     let name = args[0].clone();
     let game = GAMES.iter().find(|g| g.id == name)
         .with_context(|| {
             let games: Vec<_> = GAMES.iter().map(|g| g.id).collect();
-            format!("unknown command {name}, pick one of: {} switch sync vphysics jolt chromium skategm", games.join(" "))
+            format!("unknown command {name}, pick one of: {} switch sync vphysics jolt chromium skategm gwater2", games.join(" "))
         })?;
     install_game(game, on)
 }
@@ -603,6 +604,8 @@ pub fn is_installed(item: &str) -> bool {
         "jolt" => vphysics_swapped(&gmod) && installed_version("jolt").is_some(),
         "chromium" => chromium_patched(&gmod),
         "skategm" => gmod.join("garrysmod/lua/bin/gmcl_skategm_win64.dll").exists(),
+        "gwater2" => installed_version("gwater2").is_some()
+            && ["win64", "linux64"].iter().any(|b| gmod.join(format!("garrysmod/lua/bin/gmcl_gwater2_{b}.dll")).exists()),
         _ => uses_steam_copy(item) || mount_cfg().and_then(|c| Ok(fs::read_to_string(c)?)).is_ok_and(|c| mount_entry(&c, item).is_some()),
     }
 }
@@ -641,9 +644,15 @@ const PINNED: &[(&str, &str)] = &[
     ("vphysics_jolt_0.20_gmod_win32.zip", "bf64153fa0134223866cc3816f6b0ff172f6b5bdf343f9580b0edfab2b583e2c"),
     ("vphysics_jolt_0.20_gmod_linux64.zip", "47f2a2e26209d96464eae74182bb490b5d7200ca9ffe9a54f302c2db8d78f1c6"),
     ("vphysics_jolt_0.20_gmod_linux32.zip", "dd9035a659f802966f44008adac45528bb363ef135bad80410a35964b437d2c4"),
+    ("gwater2_1.0.zip", "3aefdc5b3b52df4e76ba45a54c0f1c1af3e329ec84e7ad6d9e43670595397464"),
 ];
 pub const PATCHTOOL_REPO: &str = "solsticegamestudios/GModPatchTool";
 pub const SKATEGM_REPO: &str = "the-schwilliam/SkateGM";
+pub const GWATER2_REPO: &str = "meetric1/gwater2";
+/// GWater2's one release (the other is a zip of betas); its Windows zip has no GitHub digest, so it's pinned.
+pub const GWATER2_TAG: &str = "v1.0";
+/// GWater2's Lua (SWEPs, entities, menu) ships only on the Workshop; the release zips are its engine part.
+const GWATER2_WORKSHOP: &str = "3403736992";
 /// uv runs SkateGM's Python exporter with its own Python and packages, so users install nothing.
 const UV_TAG: &str = "0.13.0";
 /// The vgmstream release SkateGM's own installer bundles (its tools/fetch_vgmstream.py).
@@ -857,7 +866,15 @@ fn chromium_patched(gmod: &Path) -> bool {
 
 /// Undoes the patches by having Steam verify GMod's files, which restores the stock ones.
 fn unpatch_chromium() -> Result<()> {
-    let url = "steam://validate/4000";
+    open_url("steam://validate/4000")?;
+    set_installed_version("chromium", None)?;
+    println!("Steam is verifying Garry's Mod, which restores the unpatched files.");
+    println!("Note: this also restores the stock vphysics if VPhysics-Box3D or VPhysics-Jolt was installed.");
+    Ok(())
+}
+
+/// Opens a URL (here steam:// ones, handled by Steam) with the desktop's default handler.
+fn open_url(url: &str) -> Result<()> {
     let mut cmd = match std::env::consts::OS {
         "windows" => Command::new("explorer"),
         "macos" => Command::new("open"),
@@ -865,10 +882,15 @@ fn unpatch_chromium() -> Result<()> {
     };
     hide_window(cmd.arg(url));
     cmd.status()?;
-    set_installed_version("chromium", None)?;
-    println!("Steam is verifying Garry's Mod, which restores the unpatched files.");
-    println!("Note: this also restores the stock vphysics if VPhysics-Box3D or VPhysics-Jolt was installed.");
     Ok(())
+}
+
+/// Deletes a file GMod may hold open; already gone is fine.
+fn delete(p: &Path) -> Result<()> {
+    match fs::remove_file(p) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => bail!("couldn't remove {} ({e}): close Garry's Mod and try again", p.display()),
+        _ => Ok(()),
+    }
 }
 
 /// SkateGM's engine module is Windows-only, so on Linux GMod has to run under Proton.
@@ -920,10 +942,7 @@ fn remove_skategm() -> Result<()> {
     let g = gmod_dir()?.join("garrysmod");
     for f in ["lua/bin/gmcl_skategm_win64.dll", "lua/bin/skategm_sdl2.dll", "lua/bin/skategm_gamecontrollerdb.txt",
               "data/skategm/datapath.txt", "data/skategm/skate3_sounds.json", "data/skategm/skate3_music.json"] {
-        match fs::remove_file(g.join(f)) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => bail!("couldn't remove {f} ({e}): close Garry's Mod and try again"),
-            _ => {}
-        }
+        delete(&g.join(f))?;
     }
     for d in ["addons/skategm", "addons/skategm_maps", "addons/skategm_s3sounds", "addons/skategm_s3music", "data/skategm_hud"] {
         let _ = fs::remove_dir_all(g.join(d));
@@ -931,6 +950,65 @@ fn remove_skategm() -> Result<()> {
     let _ = fs::remove_dir_all(data_dir()?.join("skategm"));
     set_installed_version("skategm", None)?;
     println!("SkateGM removed (your settings, boards and replays in data/skategm are kept).");
+    Ok(())
+}
+
+/// The NVIDIA driver's CUDA library, which GWater2 needs for native Linux GMod (none with AMD/Intel).
+fn libcuda() -> Option<PathBuf> {
+    // Debian/Ubuntu, Fedora, Arch (where lib64 links to lib), NixOS; 64-bit dirs first, Fedora's /usr/lib is 32-bit.
+    ["/usr/lib/x86_64-linux-gnu", "/usr/lib64", "/usr/lib", "/run/opengl-driver/lib"].iter()
+        .map(|d| Path::new(d).join("libcuda.so.1")).find(|p| p.exists())
+}
+
+/// Unpacks GWater2's release zip (module, NVIDIA FleX dlls, shaders) into the GMod folder like its own
+/// installer, and opens its Workshop page if the Lua part isn't subscribed. Natively on Linux the Linux zip
+/// is used and libcuda is copied to `bin/linux64`, as its instructions say; Proton uses the Windows zip.
+/// The files are listed after the tag in `versions/gwater2`, for updates and uninstall.
+fn install_gwater2(tag: Option<&str>) -> Result<()> {
+    if cfg!(target_os = "macos") { bail!("GWater2 has no macOS build"); }
+    let native_linux = cfg!(target_os = "linux") && !gmod_uses_wine();
+    let cuda = if native_linux {
+        if current_branch(true)? != "x86-64" { bail!("GWater2 on Linux needs the 64-bit branch installed: switch to it and let Steam update GMod first"); }
+        Some(libcuda().context("GWater2 on native Linux needs an NVIDIA GPU and driver (no libcuda.so.1 found); with AMD or Intel, run GMod under Proton")?)
+    } else { None };
+    let gmod = gmod_dir()?;
+    let release = github_release(GWATER2_REPO, Some(tag.unwrap_or(GWATER2_TAG)))?;
+    let tag = release["tag_name"].as_str().context("release has no tag")?;
+    let ver = tag.trim_start_matches('v');
+    let asset = if native_linux { format!("gwater2_{ver}_LINUX.zip") } else { format!("gwater2_{ver}.zip") };
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(github_asset(&release, &asset)?))?;
+    remove_gwater2_files(&gmod)?;
+    zip.extract(&gmod).context("couldn't unpack GWater2: close Garry's Mod and try again")?;
+    let mut files: Vec<String> = zip.file_names().collect::<Result<Vec<_>, _>>()?
+        .into_iter().filter(|n| !n.ends_with('/')).map(|n| n.into_owned()).collect();
+    if let Some(cuda) = cuda {
+        // ponytail: a copy of the current driver's lib; reinstall GWater2 after an NVIDIA driver update
+        fs::copy(&cuda, gmod.join("bin/linux64/libcuda.so")).with_context(|| format!("copying {}", cuda.display()))?;
+        files.push("bin/linux64/libcuda.so".into());
+    }
+    set_installed_version("gwater2", Some(&format!("{tag}\n{}", files.join("\n"))))?;
+    println!("GWater2 {tag}: installed {} files", files.len());
+    if gmod.join("garrysmod/addons/gwater2").exists() {
+        println!("Note: garrysmod/addons/gwater2 (an older copy) clashes with the Workshop version; remove it unless you're working on GWater2");
+    }
+    if !manifest_path()?.with_file_name(format!("workshop/content/{GMOD_APPID}/{GWATER2_WORKSHOP}")).exists() {
+        open_url(&format!("steam://url/CommunityFilePage/{GWATER2_WORKSHOP}"))?;
+        println!("Subscribe to GWater2 on the Workshop page that just opened: its add-on has the water guns, entities and menu.");
+    }
+    Ok(())
+}
+
+/// Deletes the files the last GWater2 install recorded.
+fn remove_gwater2_files(gmod: &Path) -> Result<()> {
+    let record = data_dir().and_then(|d| Ok(fs::read_to_string(d.join("versions/gwater2"))?)).unwrap_or_default();
+    for rel in record.lines().skip(1) { delete(&gmod.join(rel))?; }
+    Ok(())
+}
+
+fn remove_gwater2() -> Result<()> {
+    remove_gwater2_files(&gmod_dir()?)?;
+    set_installed_version("gwater2", None)?;
+    println!("GWater2 removed. Unsubscribe from it on the Workshop to remove its add-on too.");
     Ok(())
 }
 

@@ -7,6 +7,7 @@ It can:
 - Switch Gmod to the x86-64 branch and run GModPatchTool so the Chromium browser works
 - Install VPhysics-Box3D or VPhysics-Jolt
 - Install SkateGM from your own copy of Skate 3
+- Install GWater2
 - On Linux, pick between native and Proton
 
 Works on Linux. Windows and Mac might work but I haven't tested it.
@@ -38,6 +39,8 @@ Open it, pick your Gmod folder if it doesn't find it, and click stuff. Close Ste
 
 SkateGM needs the x86-64 branch, and Windows or GMod running under Proton on Linux. You also need your own Skate 3 (Xbox 360) disc image (`.iso`) or the `default.xex` from an extracted copy.
 
+GWater2 also needs its [workshop addon](https://steamcommunity.com/sharedfiles/filedetails/?id=3403736992). On Linux it can only run natively if you use an NVIDIA GPU on the x86-64 branch. With AMD or Intel, running Gmod via proton is required.
+
 You can also use it from the terminal:
 
 ```
@@ -49,6 +52,7 @@ gmtoolkit chromium off     # undo them
 gmtoolkit vphysics         # install box3d (vphysics off to undo)
 gmtoolkit jolt             # install jolt instead (jolt off to undo)
 gmtoolkit skategm skate3.iso   # install skategm (skategm off to undo)
+gmtoolkit gwater2          # install gwater2 (gwater2 off to undo)
 gmtoolkit sync             # fix mounts if something breaks
 ```
 
@@ -64,6 +68,7 @@ cargo run --release
 - [VPhysics-Box3D](https://github.com/Asphaltian/VPhysics-Box3D)
 - [VPhysics-Jolt](https://github.com/misyltoad/VPhysics-Jolt)
 - [SkateGM](https://github.com/the-schwilliam/SkateGM)
+- [GWater2](https://github.com/meetric1/gwater2)
 
 ## License
 

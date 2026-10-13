@@ -214,6 +214,7 @@ fn fetch_remote(remote: Arc<Mutex<Remote>>, ctx: egui::Context) {
     if crate::skategm_supported() { repos.push(crate::SKATEGM_REPO); }
     // Only Jolt's pinned release can be verified, so it's the only one offered.
     remote.lock().unwrap().releases.insert(crate::JOLT_REPO, vec![crate::JOLT_TAG.to_owned()]);
+    remote.lock().unwrap().releases.insert(crate::GWATER2_REPO, vec![crate::GWATER2_TAG.to_owned()]);
     for repo in repos {
         let (remote, ctx) = (remote.clone(), ctx.clone());
         thread::spawn(move || if let Ok(tags) = crate::releases(repo) {
@@ -378,6 +379,7 @@ fn source(id: &str) -> Source {
         "jolt" => Source::GitHub(crate::JOLT_REPO),
         "chromium" => Source::GitHub(crate::PATCHTOOL_REPO),
         "skategm" => Source::GitHub(crate::SKATEGM_REPO),
+        "gwater2" => Source::GitHub(crate::GWATER2_REPO),
         _ => Source::Steam(crate::GAMES.iter().find(|g| g.id == id).map_or(0, |g| g.server_appid)),
     }
 }
@@ -389,7 +391,7 @@ impl App {
             self.steam_copy.insert(g.id, crate::uses_steam_copy(g.id));
             self.partial.insert(g.id, crate::is_partial(g.id));
         }
-        for item in crate::GAMES.iter().map(|g| g.id).chain(["vphysics", "jolt", "chromium", "skategm"]) {
+        for item in crate::GAMES.iter().map(|g| g.id).chain(["vphysics", "jolt", "chromium", "skategm", "gwater2"]) {
             self.installed.insert(item, crate::is_installed(item));
             self.versions.insert(item, crate::installed_version(item));
         }
@@ -720,6 +722,15 @@ impl eframe::App for App {
                                 self.item_row(ui, "vphysics", "VPhysics-Box3D", "A faster physics engine. GMod's original is backed up.", Ok(()), busy);
                                 ui.separator();
                                 self.item_row(ui, "jolt", "VPhysics-Jolt", "Physics engine built on Jolt. Last released in 2024. GMod's original is backed up.", Ok(()), busy);
+                            }
+                            if !cfg!(target_os = "macos") {
+                                // Native Linux runs it on CUDA, which only the 64-bit branch's module supports.
+                                let native = cfg!(target_os = "linux") && self.compat.is_empty();
+                                let (desc, can) = if native {
+                                    ("Real-time water and fluids. Natively on Linux it needs an NVIDIA GPU.", needs_x64)
+                                } else { ("Real-time water and fluids. Needs a DirectX 11 GPU.", Ok(())) };
+                                ui.separator();
+                                self.item_row(ui, "gwater2", "GWater2", desc, can, busy);
                             }
                             if crate::skategm_supported() {
                                 ui.separator();
