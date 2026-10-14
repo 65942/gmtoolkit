@@ -75,11 +75,20 @@ fn main() -> Result<()> {
         Some("sync") => { for line in sync_steam_copies() { println!("{line}"); } return Ok(()); }
         Some(engine @ ("vphysics" | "jolt")) => return set_vphysics(engine, on, tag),
         Some("chromium") => return if on { run_patchtool(tag) } else { unpatch_chromium() },
-        // skategm [<tag>] [<disc .iso or default.xex>]
+        // skategm [<tag>] [<disc .iso or default.xex>] [--skate2 <disc>] [--keep-data] [--no-addon] [--maps all|none|<map,...>]
+        // skategm off [--delete-data]
         Some("skategm") => {
-            let disc = args[1..].iter().find(|a| Path::new(a).is_file()).map(String::as_str);
-            let tag = args[1..].iter().map(String::as_str).find(|a| Some(*a) != disc && *a != "off");
-            return if on { install_skategm(tag, disc) } else { remove_skategm() };
+            let rest = &args[1..];
+            let value = |f: &str| rest.iter().position(|a| a == f).and_then(|i| rest.get(i + 1)).map(String::as_str);
+            let (maps, skate2) = (value("--maps"), value("--skate2"));
+            let plain: Vec<&str> = rest.iter().map(String::as_str)
+                .filter(|a| !a.starts_with("--") && Some(*a) != maps && Some(*a) != skate2).collect();
+            let disc = plain.iter().copied().find(|a| Path::new(a).is_file());
+            let tag = plain.iter().copied().find(|a| Some(*a) != disc && *a != "off");
+            let flag = |f: &str| rest.iter().any(|a| a == f);
+            return if on {
+                install_skategm(tag, disc, skate2, flag("--keep-data"), !flag("--no-addon"), maps.unwrap_or("all"))
+            } else { remove_skategm(flag("--delete-data")) };
         }
         Some("gwater2") => return if on { install_gwater2(tag) } else { remove_gwater2() },
         _ => {}
@@ -561,15 +570,22 @@ fn set_compat(tool: &str) -> Result<()> {
 /// (Steam downloads it on demand). Valve's Protons live in library `common/` dirs, custom ones
 /// (GE etc.) in `compatibilitytools.d` with a manifest naming them.
 pub fn compat_tools() -> Vec<(String, String)> {
-    let mut tools = vec![("proton_experimental".to_owned(), "Proton Experimental".to_owned())];
+    compat_tool_dirs().into_iter().map(|(id, name, _)| (id, name)).collect()
+}
+
+/// `compat_tools` with each tool's folder (none for Proton Experimental until Steam has fetched it).
+fn compat_tool_dirs() -> Vec<(String, String, Option<PathBuf>)> {
+    let mut tools = vec![("proton_experimental".to_owned(), "Proton Experimental".to_owned(), None)];
     let Ok(steam) = steam() else { return tools };
     let dirs = |p: PathBuf| fs::read_dir(p).into_iter().flatten().flatten().map(|e| e.path());
     for lib in steam.library_paths().unwrap_or_default() {
         for dir in dirs(lib.join("steamapps/common")) {
             let name = dir.file_name().unwrap().to_string_lossy().into_owned();
             // "Proton - Experimental" is already listed first.
-            if let Some(v) = name.strip_prefix("Proton ").filter(|v| !v.contains("Experimental")) {
-                tools.push((valve_proton_id(v), name));
+            if name == "Proton - Experimental" {
+                tools[0].2 = Some(dir);
+            } else if let Some(v) = name.strip_prefix("Proton ") {
+                tools.push((valve_proton_id(v), name, Some(dir)));
             }
         }
     }
@@ -579,14 +595,23 @@ pub fn compat_tools() -> Vec<(String, String)> {
             let Ok(vdf) = keyvalues_parser::parse(&text) else { continue };
             let Some(list) = vdf.value.get_obj().and_then(|o| o.get("compat_tools")).and_then(|v| v[0].get_obj()) else { continue };
             for (id, v) in list.iter() {
-                let display = v[0].get_obj().and_then(|o| o.get("display_name")).and_then(|d| d[0].get_str()).unwrap_or(id);
-                tools.push((id.to_string(), display.to_owned()));
+                let field = |k| v[0].get_obj().and_then(|o| o.get(k)).and_then(|d| d[0].get_str());
+                tools.push((id.to_string(), field("display_name").unwrap_or(id).to_owned(), Some(dir.join(field("install_path").unwrap_or(".")))));
             }
         }
     }
     let mut seen = std::collections::HashSet::new();
     tools.retain(|t| seen.insert(t.0.clone()));
     tools
+}
+
+/// The wine of GMod's Proton, to run Windows tools (Source's map compilers) the way GMod runs.
+fn proton_wine() -> Result<PathBuf> {
+    let tool = compat_tool();
+    let dir = compat_tool_dirs().into_iter().find(|t| t.0 == tool).and_then(|t| t.2)
+        .with_context(|| format!("compatibility tool {tool} not found: start GMod once so Steam installs it"))?;
+    ["files/bin/wine", "dist/bin/wine"].iter().map(|w| dir.join(w)).find(|w| w.is_file())
+        .with_context(|| format!("no wine in {}", dir.display()))
 }
 
 /// Steam's internal ids for Valve Protons: "9.0" -> proton_9, "5.13" -> proton_513, "Hotfix" -> proton_hotfix.
@@ -893,6 +918,58 @@ fn delete(p: &Path) -> Result<()> {
     }
 }
 
+// SkateGM's texture encoder (build.rs) and the source it was built from, included by the assembler:
+// as include_bytes constants they made LLVM crash (GlobalDCE) on about half of the Windows LTO builds.
+#[cfg(vtfenc)]
+std::arch::global_asm!(
+    ".pushsection .rodata.gmtoolkit_vtfenc,\"a\"", // COFF reads the "a" flag as read-only data too
+    ".balign 16",
+    ".globl gmtoolkit_vtfenc", "gmtoolkit_vtfenc:", concat!(".incbin \"", env!("VTFENC_LIB"), "\""),
+    ".globl gmtoolkit_vtfenc_source", "gmtoolkit_vtfenc_source:", concat!(".incbin \"", env!("VTFENC_SRC"), "\""),
+    ".globl gmtoolkit_vtfenc_end", "gmtoolkit_vtfenc_end:",
+    ".popsection",
+);
+/// (encoder, source) from the block above.
+#[cfg(vtfenc)]
+fn vtfenc() -> (&'static [u8], &'static [u8]) {
+    unsafe extern "C" {
+        static gmtoolkit_vtfenc: u8;
+        static gmtoolkit_vtfenc_source: u8;
+        static gmtoolkit_vtfenc_end: u8;
+    }
+    let span = |a: &'static u8, b: &'static u8| unsafe {
+        std::slice::from_raw_parts(a as *const u8, (b as *const u8).offset_from(a as *const u8) as usize)
+    };
+    unsafe { (span(&gmtoolkit_vtfenc, &gmtoolkit_vtfenc_source), span(&gmtoolkit_vtfenc_source, &gmtoolkit_vtfenc_end)) }
+}
+
+/// The maps SkateGM's installer offers, by its sections (their mapgen/install.py `SECTIONS`), as (map, name).
+/// ponytail: copied from 9.0; the GUI passes `--maps all` when every box is ticked, so maps a newer release
+/// adds still get built. `sgm_skate2_*` maps need the Skate 2 disc.
+pub const SKATEGM_MAPS: &[(&str, &[(&str, &str)])] = &[
+    ("Entire Maps", &[("sgm_skate3_portcarverton", "Port Carverton"), ("sgm_skate2_newsanvan", "New San Vanelona (Skate 2)")]),
+    ("Map Segments", &[("sgm_skate3_university", "University Campus"), ("sgm_skate3_unibowl", "University Bowl"),
+        ("sgm_skate3_ultramegapark", "Super Ultra Mega Park"), ("sgm_skate3_industrial", "Industrial"), ("sgm_skate3_quarry", "Quarry")]),
+    ("Skate Parks", &[("sgm_skate3_maloof", "Maloof Money Cup"), ("sgm_skate3_skateschool", "Skate School"), ("sgm_skate3_blackbox", "Black Box")]),
+];
+const SKATEGM_WORKSHOP: &str = "3819058525";
+
+/// The Skate 3 and Skate 2 discs used last time, if they're still there.
+pub fn skategm_discs() -> [String; 2] {
+    ["disc.txt", "disc_skate2.txt"].map(|f| data_dir().ok().and_then(|d| fs::read_to_string(d.join("skategm").join(f)).ok())
+        .filter(|d| Path::new(d).is_file()).unwrap_or_default())
+}
+
+/// Whether SkateGM's data was converted before (the GUI's "keep the game data" box).
+pub fn skategm_converted() -> bool {
+    data_dir().is_ok_and(|d| d.join("skategm/data/assets/private/skater.glb").is_file())
+}
+
+/// Whether the user is subscribed to SkateGM's Workshop add-on (then the local copy isn't needed).
+pub fn skategm_workshop() -> bool {
+    manifest_path().is_ok_and(|m| m.with_file_name(format!("workshop/content/{GMOD_APPID}/{SKATEGM_WORKSHOP}")).exists())
+}
+
 /// SkateGM's engine module is Windows-only, so on Linux GMod has to run under Proton.
 pub fn skategm_supported() -> bool {
     cfg!(windows) || gmod_uses_wine()
@@ -901,22 +978,35 @@ pub fn skategm_supported() -> bool {
 /// Installs SkateGM from its release zip: `skategm.py` converts the user's own Skate 3 disc (.iso or
 /// default.xex) with the bundled exporter and copies the module and add-on in. Without a disc, the one
 /// used last time is converted again if it's still there, else the converted data is kept.
-fn install_skategm(tag: Option<&str>, disc: Option<&str>) -> Result<()> {
+fn install_skategm(tag: Option<&str>, disc: Option<&str>, skate2: Option<&str>, keep_data: bool, addon: bool, maps: &str) -> Result<()> {
     if !skategm_supported() { bail!("SkateGM's module is Windows-only: on Linux, GMod has to run under Proton"); }
     // The module is 64-bit; MountedConfig confirms Steam finished switching.
     if current_branch(true)? != "x86-64" { bail!("SkateGM needs the 64-bit branch installed: switch to it and let Steam update GMod first"); }
     let gmod = gmod_dir()?;
     let dir = data_dir()?.join("skategm");
     fs::create_dir_all(&dir)?;
-    let remembered = dir.join("disc.txt");
-    if let Some(d) = disc { fs::write(&remembered, d)?; }
-    let disc = fs::read_to_string(&remembered).ok().filter(|d| Path::new(d).is_file());
+    // Both discs are remembered, so Update converts and builds from them again.
+    let remember = |file: &str, given: Option<&str>| -> Result<Option<String>> {
+        if let Some(d) = given { fs::write(dir.join(file), d)?; }
+        Ok(fs::read_to_string(dir.join(file)).ok().filter(|d| Path::new(d).is_file()))
+    };
+    let disc = remember("disc.txt", disc)?;
+    let skate2 = remember("disc_skate2.txt", skate2)?;
     let release = github_release(SKATEGM_REPO, tag)?;
     let zip = release["assets"].as_array().into_iter().flatten().filter_map(|a| a["name"].as_str())
         .find(|n| n.starts_with("skategm_") && n.ends_with(".zip")).context("release has no skategm zip")?;
     let unpacked = dir.join("release");
     let _ = fs::remove_dir_all(&unpacked);
     zip::ZipArchive::new(std::io::Cursor::new(github_asset(&release, zip)?))?.extract(&unpacked)?;
+    // The texture encoder built from our copy of their source (build.rs), if this release's source is the same.
+    #[cfg(vtfenc)]
+    {
+        let native = unpacked.join("exporter/mapgen/native");
+        let (encoder, source) = vtfenc();
+        if fs::read(native.join("vtfenc.rs")).is_ok_and(|s| s == source) {
+            fs::write(native.join("vtfenc.dll"), encoder)?;
+        }
+    }
     let (uv_asset, uv_exe, vgm_asset, vgm_exe) = if cfg!(windows) {
         ("uv-x86_64-pc-windows-msvc.zip", "uv.exe", "vgmstream-win64.zip", "vgmstream-cli.exe")
     } else {
@@ -928,17 +1018,24 @@ fn install_skategm(tag: Option<&str>, disc: Option<&str>) -> Result<()> {
     fs::write(&script, include_str!("skategm.py"))?;
     let data = dir.join("data");
     let mut cmd = Command::new(uv);
-    cmd.env("UV_CACHE_DIR", dir.join("uv-cache")).env("UV_PYTHON_INSTALL_DIR", dir.join("python"))
+    cmd.env("SKATEGM_TAG", release["tag_name"].as_str().unwrap_or_default())
+        .env("SKATEGM_SKATE2", skate2.unwrap_or_default()).env("SKATEGM_KEEP", if keep_data { "1" } else { "0" }).env("SKATEGM_ADDON", if addon { "1" } else { "0" }).env("SKATEGM_MAPS", maps).env("UV_CACHE_DIR", dir.join("uv-cache")).env("UV_PYTHON_INSTALL_DIR", dir.join("python"))
         .args(["run", "--no-project", "--python", "3.13", "--with", "numpy", "--with", "pillow", "--with", "soundfile", "python", "-I"])
         .arg(&script).arg(&unpacked).arg(&gmod).arg(&data).arg(mount_path(&data.join("assets"))).arg(&vgmstream);
     if let Some(d) = &disc { cmd.arg(d); }
+    if gmod_uses_wine() {
+        // Its own prefix: Proton ends every process in GMod's when GMod closes, killing a compile midway.
+        cmd.env("SKATEGM_WINE", proton_wine()?).env("WINEPREFIX", dir.join("wine"))
+            .env("WINEDEBUG", "-all").env("WINEDLLOVERRIDES", "mscoree,mshtml=");
+    }
     hide_window(&mut cmd);
     if !cmd.status()?.success() { bail!("SkateGM install failed"); }
     set_installed_version("skategm", release["tag_name"].as_str())
 }
 
-/// Removes what SkateGM's own uninstaller does, plus the converted data and downloads.
-fn remove_skategm() -> Result<()> {
+/// Removes what SkateGM's own uninstaller does, plus the downloads. The converted data and map cache (slow to
+/// redo) and the remembered discs are kept unless `delete_data`, like their uninstaller's "remove data" choice.
+fn remove_skategm(delete_data: bool) -> Result<()> {
     let g = gmod_dir()?.join("garrysmod");
     for f in ["lua/bin/gmcl_skategm_win64.dll", "lua/bin/skategm_sdl2.dll", "lua/bin/skategm_gamecontrollerdb.txt",
               "data/skategm/datapath.txt", "data/skategm/skate3_sounds.json", "data/skategm/skate3_music.json"] {
@@ -947,9 +1044,17 @@ fn remove_skategm() -> Result<()> {
     for d in ["addons/skategm", "addons/skategm_maps", "addons/skategm_s3sounds", "addons/skategm_s3music", "data/skategm_hud"] {
         let _ = fs::remove_dir_all(g.join(d));
     }
-    let _ = fs::remove_dir_all(data_dir()?.join("skategm"));
+    let dir = data_dir()?.join("skategm");
+    for entry in fs::read_dir(&dir).into_iter().flatten().flatten() {
+        let keep = !delete_data && ["data", "disc.txt", "disc_skate2.txt"].contains(&entry.file_name().to_string_lossy().as_ref());
+        if keep { continue; }
+        let _ = if entry.path().is_dir() { fs::remove_dir_all(entry.path()) } else { fs::remove_file(entry.path()) };
+    }
     set_installed_version("skategm", None)?;
     println!("SkateGM removed (your settings, boards and replays in data/skategm are kept).");
+    if !delete_data && skategm_converted() {
+        println!("Your converted Skate 3 data and map cache are kept for a reinstall: skategm off --delete-data removes them.");
+    }
     Ok(())
 }
 

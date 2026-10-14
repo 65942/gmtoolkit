@@ -359,8 +359,28 @@ struct App {
     path_msg: Option<(bool, String)>,
     /// Folder picked in the Browse dialog, which runs on its own thread.
     picked_folder: Arc<Mutex<Option<std::path::PathBuf>>>,
-    /// SkateGM install args, completed with the disc picked in its file dialog.
-    picked_disc: Arc<Mutex<Option<Vec<String>>>>,
+    /// Disc picked in a SkateGM dialog's Browse (runs on its own thread): (0 = Skate 3 / 1 = Skate 2, path).
+    picked_disc: Arc<Mutex<Option<(usize, String)>>>,
+    /// SkateGM's install options dialog, open after its Install/Update/Modify was clicked.
+    skate_opts: Option<SkateOpts>,
+    /// The SkateGM uninstall dialog's "also delete the converted data" box.
+    delete_data: bool,
+}
+
+/// The checkboxes of SkateGM's own installer window.
+struct SkateOpts {
+    /// CLI args so far (`skategm [<tag>]`).
+    args: Vec<String>,
+    first: bool,
+    /// The dialog's button: Install / Update / Switch, or Apply for Modify.
+    action: &'static str,
+    /// Skate 3 and Skate 2 disc fields (Skate 2 is optional, for its maps).
+    discs: [String; 2],
+    keep_data: bool,
+    addon: bool,
+    maps: bool,
+    /// One per map in `SKATEGM_MAPS`, in order.
+    picks: Vec<bool>,
 }
 
 #[derive(Default)]
@@ -535,7 +555,8 @@ impl App {
                     }
                     let mut args = vec![id.to_owned()];
                     if let Some(t) = &picked { args.push(t.clone()); }
-                    let label = if !installed { "Install" } else if change { "Switch" } else if update { "Update" } else { "" };
+                    let label = if !installed { "Install" } else if change { "Switch" } else if update { "Update" }
+                        else if id == "skategm" { "Modify" } else { "" }; // SkateGM's options can change any time
                     if !label.is_empty() {
                         let b = ui.add_enabled(!busy && can_install.is_ok(), primary(label).min_size(egui::vec2(BUTTON_WIDTH, 0.0)));
                         let b = if let Err(why) = can_install { b.on_disabled_hover_text(why) } else { b };
@@ -544,17 +565,11 @@ impl App {
                         if b.clicked() {
                             match other.filter(|(o, _)| self.installed.get(o).copied().unwrap_or(false)) {
                                 Some((_, other)) => self.confirm = Some((format!("Installing {name} will uninstall {other}."), "Install", args.clone())),
-                                // A first install converts the user's own Skate 3 disc; updates reuse it.
-                                None if id == "skategm" && !installed => {
-                                    let (slot, ctx) = (self.picked_disc.clone(), ui.ctx().clone());
-                                    thread::spawn(move || {
-                                        if let Some(f) = rfd::FileDialog::new().set_title("Your Skate 3 disc image (.iso) or default.xex")
-                                            .add_filter("Skate 3 disc image or default.xex", &["iso", "xex"]).pick_file() {
-                                            *slot.lock().unwrap() = Some(args.into_iter().chain([f.display().to_string()]).collect());
-                                            ctx.request_repaint();
-                                        }
-                                    });
-                                }
+                                // SkateGM first asks the options of its own installer.
+                                None if id == "skategm" => self.skate_opts = Some(SkateOpts {
+                                    args: args.clone(), first: !installed, action: if label == "Modify" { "Apply" } else { label }, discs: crate::skategm_discs(), keep_data: false, addon: !crate::skategm_workshop(),
+                                    maps: false, picks: vec![true; crate::SKATEGM_MAPS.iter().map(|s| s.1.len()).sum()],
+                                }),
                                 None => self.start(ui.ctx(), &args.iter().map(String::as_str).collect::<Vec<_>>()),
                             }
                         }
@@ -562,7 +577,10 @@ impl App {
                     if installed {
                         let b = egui::Button::new(RichText::new("Uninstall").color(p.danger))
                             .fill(p.danger.gamma_multiply(0.12)).min_size(egui::vec2(BUTTON_WIDTH, 0.0));
-                        if ui.add_enabled(!busy, b).clicked() { self.confirm = Some((format!("Uninstall {name}?"), "Uninstall", vec![id.into(), "off".into()])); }
+                        if ui.add_enabled(!busy, b).clicked() {
+                            self.delete_data = false;
+                            self.confirm = Some((format!("Uninstall {name}?"), "Uninstall", vec![id.into(), "off".into()]));
+                        }
                     }
                 });
                 if let Source::GitHub(_) = source(id) {
@@ -655,15 +673,23 @@ impl eframe::App for App {
             }
         });
 
-        if let Some((question, action, args)) = self.confirm.clone() {
+        if let Some((question, action, mut args)) = self.confirm.clone() {
             let modal = egui::Modal::new(egui::Id::new("confirm")).show(ui.ctx(), |ui| {
                 ui.label(RichText::new(question).strong().color(p.title));
                 ui.add_space(8.0);
+                // SkateGM's converted data and map cache take most of an hour to redo, so they're kept unless asked.
+                let skategm_off = args == ["skategm", "off"];
+                if skategm_off && crate::skategm_converted() {
+                    ui.checkbox(&mut self.delete_data, "Also delete the converted Skate 3 data and map cache (several GB)");
+                    ui.label(RichText::new("Kept, a reinstall reuses them instead of redoing the slow conversion and map decoding.").small().color(p.muted));
+                    ui.add_space(8.0);
+                }
                 ui.horizontal(|ui| {
                     let b = if action == "Uninstall" {
                         egui::Button::new(RichText::new(action).color(p.danger)).fill(p.danger.gamma_multiply(0.12))
                     } else { primary(action) };
                     if ui.add_enabled(!busy, b).clicked() {
+                        if skategm_off && self.delete_data { args.push("--delete-data".into()); }
                         self.start(ui.ctx(), &args.iter().map(String::as_str).collect::<Vec<_>>());
                         self.confirm = None;
                     }
@@ -673,8 +699,89 @@ impl eframe::App for App {
             if modal.should_close() { self.confirm = None; }
         }
 
-        let disc = self.picked_disc.lock().unwrap().take();
-        if let Some(args) = disc { self.start(ui.ctx(), &args.iter().map(String::as_str).collect::<Vec<_>>()); }
+        if let Some(mut o) = self.skate_opts.take() {
+            if let Some((i, path)) = self.picked_disc.lock().unwrap().take() { o.discs[i] = path; }
+            let is_file = |d: &str| std::path::Path::new(d.trim()).is_file();
+            let converted = crate::skategm_converted();
+            let has_skate2 = is_file(&o.discs[1]);
+            // Updates may go without a disc: the converted data is kept and sounds, music and maps stay as they are.
+            let ready = (is_file(&o.discs[0]) || (!o.first && converted)) && (o.discs[1].trim().is_empty() || has_skate2);
+            let (mut go, mut cancel) = (false, false);
+            let modal = egui::Modal::new(egui::Id::new("skategm")).show(ui.ctx(), |ui| {
+                ui.label(RichText::new("SkateGM").strong().color(p.title));
+                ui.add_space(8.0);
+                egui::Grid::new("skategm_discs").num_columns(3).show(ui, |ui| {
+                    for (i, (label, title)) in [("Skate 3 disc", "Your Skate 3 disc image (.iso) or default.xex"),
+                                                ("Skate 2 disc", "Your Skate 2 disc image (.iso) or default.xex, for its maps")].into_iter().enumerate() {
+                        ui.label(label);
+                        let hint = if i == 0 { ".iso or default.xex" } else { "optional, for New San Vanelona" };
+                        ui.add(egui::TextEdit::singleline(&mut o.discs[i]).hint_text(hint).desired_width(320.0));
+                        if ui.button("Browse…").clicked() {
+                            let (slot, ctx) = (self.picked_disc.clone(), ui.ctx().clone());
+                            thread::spawn(move || {
+                                if let Some(f) = rfd::FileDialog::new().set_title(title)
+                                    .add_filter("Disc image or default.xex", &["iso", "xex"]).pick_file() {
+                                    *slot.lock().unwrap() = Some((i, f.display().to_string()));
+                                    ctx.request_repaint();
+                                }
+                            });
+                        }
+                        ui.end_row();
+                    }
+                });
+                ui.add_space(4.0);
+                ui.add_enabled(converted, egui::Checkbox::new(&mut o.keep_data, "Keep the game data I already converted (skip converting)"));
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut o.addon, "Install add-on");
+                    ui.label(RichText::new("(You can also do this from the Workshop)").small().color(p.muted));
+                });
+                ui.checkbox(&mut o.maps, "Generate maps (slow)");
+                if o.maps {
+                    let mut i = 0;
+                    for (section, maps) in crate::SKATEGM_MAPS {
+                        ui.add_space(4.0);
+                        ui.indent(section, |ui| {
+                            ui.label(RichText::new(*section).strong().color(p.title));
+                            egui::Grid::new(section).num_columns(2).show(ui, |ui| {
+                                for (n, (map, name)) in maps.iter().enumerate() {
+                                    let usable = !map.starts_with("sgm_skate2_") || has_skate2;
+                                    let b = ui.add_enabled(usable, egui::Checkbox::new(&mut o.picks[i], *name)).on_hover_text(*map);
+                                    if !usable { b.on_disabled_hover_text("Needs your Skate 2 disc"); }
+                                    i += 1;
+                                    if n % 2 == 1 { ui.end_row(); }
+                                }
+                            });
+                        });
+                    }
+                }
+                ui.add_space(8.0);
+                if !ready {
+                    let why = if !is_file(&o.discs[0]) { "Choose your Skate 3 disc image (.iso) or default.xex." } else { "The Skate 2 disc doesn't exist." };
+                    ui.label(RichText::new(why).small().color(p.muted));
+                }
+                ui.horizontal(|ui| {
+                    go = ui.add_enabled(!busy && ready, primary(o.action)).clicked();
+                    cancel = ui.button("Cancel").clicked();
+                });
+            });
+            if go {
+                let mut args = o.args.clone();
+                if is_file(&o.discs[0]) { args.push(o.discs[0].trim().into()); }
+                if has_skate2 { args.extend(["--skate2".into(), o.discs[1].trim().into()]); }
+                if o.keep_data && converted { args.push("--keep-data".into()); }
+                if !o.addon { args.push("--no-addon".into()); }
+                // Skate 2 maps without its disc are left out; every usable box ticked means all (newer releases' too).
+                let maps: Vec<(&str, bool)> = crate::SKATEGM_MAPS.iter().flat_map(|s| s.1.iter().map(|m| m.0)).zip(o.picks.iter().copied())
+                    .filter(|(m, _)| !m.starts_with("sgm_skate2_") || has_skate2).collect();
+                let picked: Vec<&str> = maps.iter().filter(|m| m.1).map(|m| m.0).collect();
+                args.push("--maps".into());
+                args.push(if !o.maps || picked.is_empty() { "none".into() } else if picked.len() == maps.len() { "all".into() } else { picked.join(",") });
+                self.start(ui.ctx(), &args.iter().map(String::as_str).collect::<Vec<_>>());
+            } else if !cancel && !modal.should_close() {
+                self.skate_opts = Some(o);
+            }
+        }
+
         if let Some(p) = self.picked_folder.lock().unwrap().take() {
             self.path_input = p.display().to_string();
             self.path_msg = None;

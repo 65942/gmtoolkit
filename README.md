@@ -37,7 +37,7 @@ There's no release yet. You can get a build from the Actions tab (you need to be
 
 Open it, pick your Gmod folder if it doesn't find it, and click stuff. Close Steam before switching branches.
 
-SkateGM needs the x86-64 branch, and Windows or GMod running under Proton on Linux. You also need your own Skate 3 (Xbox 360) disc image (`.iso`) or the `default.xex` from an extracted copy.
+SkateGM needs the x86-64 branch, and Windows or GMod running under Proton on Linux. You also need your own Skate 3 (Xbox 360) disc image (`.iso`) or the `default.xex` from an extracted copy. Its maps (Port Carverton and the rest) are built on your PC during install, which takes a while and about 10 GB of free space.
 
 GWater2 also needs its [workshop addon](https://steamcommunity.com/sharedfiles/filedetails/?id=3403736992). On Linux it can only run natively if you use an NVIDIA GPU on the x86-64 branch. With AMD or Intel, running Gmod via proton is required.
 
@@ -52,6 +52,7 @@ gmtoolkit chromium off     # undo them
 gmtoolkit vphysics         # install box3d (vphysics off to undo)
 gmtoolkit jolt             # install jolt instead (jolt off to undo)
 gmtoolkit skategm skate3.iso   # install skategm (skategm off to undo)
+gmtoolkit skategm --maps sgm_skate3_portcarverton   # also: --maps none, --no-addon, --keep-data
 gmtoolkit gwater2          # install gwater2 (gwater2 off to undo)
 gmtoolkit sync             # fix mounts if something breaks
 ```
@@ -67,7 +68,7 @@ cargo run --release
 - [GModPatchTool](https://github.com/solsticegamestudios/GModPatchTool)
 - [VPhysics-Box3D](https://github.com/Asphaltian/VPhysics-Box3D)
 - [VPhysics-Jolt](https://github.com/misyltoad/VPhysics-Jolt)
-- [SkateGM](https://github.com/the-schwilliam/SkateGM)
+- [SkateGM](https://github.com/the-schwilliam/SkateGM) (`src/vtfenc.rs` is their texture encoder, copied unchanged, GPL-3.0)
 - [GWater2](https://github.com/meetric1/gwater2)
 
 ## License
