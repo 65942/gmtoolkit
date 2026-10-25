@@ -1,6 +1,6 @@
 # GMToolKit
 
-A tool I made to set up Garry's Mod without doing everything by hand.
+I mostly made this so I wouldn't have to explain to tech-illiterate friends how to install CSS textures and use GModPatchTool
 
 It can:
 - Download content from other Source games via SteamCMD, even if you don't own them
