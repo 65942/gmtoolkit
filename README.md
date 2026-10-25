@@ -1,6 +1,6 @@
 # GMToolKit
 
-I mostly made this so I wouldn't have to explain to tech-illiterate friends how to install CSS textures and use GModPatchTool
+I mostly made this so I wouldn't have to explain to friends how to install CSS textures and use GModPatchTool ever again
 
 It can:
 - Download content from other Source games via SteamCMD, even if you don't own them
